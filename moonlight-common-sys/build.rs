@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 fn main() {
     generate_bindings();
+    compile_log_shim();
 
     let allow_vendored = var("MOONLIGHT_COMMON_NO_VENDOR").is_err();
 
@@ -13,6 +14,14 @@ fn main() {
     let moonlight_output = compile_moonlight(allow_vendored);
 
     link(moonlight_output, allow_vendored);
+}
+
+fn compile_log_shim() {
+    println!("cargo::rerun-if-changed=csrc/log_shim.c");
+    cc::Build::new()
+        .file("csrc/log_shim.c")
+        .warnings(true)
+        .compile("moonlight_sys_log_shim");
 }
 
 fn generate_bindings() {

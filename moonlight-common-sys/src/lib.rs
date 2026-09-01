@@ -2,28 +2,46 @@
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
 
-use std::os::raw::c_char;
-
-use printf_compat::{format, output};
+use std::{
+    ffi::CStr,
+    os::raw::c_char,
+    sync::atomic::{AtomicPtr, Ordering},
+};
 
 pub mod limelight {
     include!(concat!(env!("OUT_DIR"), "/limelight.rs"));
 }
 
-pub trait LogMessageCallback {
-    fn log_message(text: String);
+pub type LogMessageHandler = fn(&str);
+
+static LOG_MESSAGE_HANDLER: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
+
+/// Installs the handler that receives formatted moonlight-common-c log lines.
+/// Passing `None` silences the log output.
+pub fn set_log_message_handler(handler: Option<LogMessageHandler>) {
+    let pointer = handler.map_or(std::ptr::null_mut(), |handler| handler as *mut ());
+    LOG_MESSAGE_HANDLER.store(pointer, Ordering::Release);
 }
 
-/// Wraps the log_message function
-#[allow(clippy::missing_safety_doc)]
-pub unsafe extern "C" fn log_message_wrapper<C>(message: *const c_char, args: ...)
-where
-    C: LogMessageCallback,
-{
-    unsafe {
-        let mut text = String::new();
-        format(message, args, output::fmt_write(&mut text));
+unsafe extern "C" {
+    /// printf-style variadic log callback for `_CONNECTION_LISTENER_CALLBACKS::logMessage`.
+    /// Defined in `csrc/log_shim.c`; it formats the message and forwards the
+    /// result to [`set_log_message_handler`].
+    pub fn moonlight_sys_log_message(format: *const c_char, ...);
+}
 
-        C::log_message(text);
+#[unsafe(no_mangle)]
+extern "C" fn moonlight_sys_rust_log(message: *const c_char) {
+    let pointer = LOG_MESSAGE_HANDLER.load(Ordering::Acquire);
+    if pointer.is_null() || message.is_null() {
+        return;
     }
+
+    // SAFETY: the pointer was produced from a `LogMessageHandler` in
+    // `set_log_message_handler` and function pointers are never freed.
+    let handler: LogMessageHandler = unsafe { std::mem::transmute(pointer) };
+    // SAFETY: the C side passes a NUL-terminated buffer that outlives this call.
+    let text = unsafe { CStr::from_ptr(message) }.to_string_lossy();
+
+    handler(text.trim_end_matches(['\r', '\n']));
 }

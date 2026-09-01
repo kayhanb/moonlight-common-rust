@@ -7,8 +7,6 @@ license.workspace = true
 [dependencies]
 openssl-sys.workspace = true
 
-printf-compat = "0.4.0"
-
 [package.metadata.cargo-shear]
 # openssl sys is required for moonlight common c to compile
 ignored = ["openssl-sys"]
@@ -21,6 +19,7 @@ vendored = ["dep:cmake"]
 
 [build-dependencies]
 bindgen = "0.72.1"
+cc = "1.4.4"
 cmake = { version = "0.1.57", optional = true }
 
 [lib]

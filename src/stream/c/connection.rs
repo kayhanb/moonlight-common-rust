@@ -5,9 +5,8 @@ use std::{
 };
 
 use moonlight_common_sys::{
-    LogMessageCallback,
     limelight::{_CONNECTION_LISTENER_CALLBACKS, LiGetHdrMetadata, SS_HDR_METADATA},
-    log_message_wrapper,
+    moonlight_sys_log_message, set_log_message_handler,
 };
 use num::FromPrimitive;
 
@@ -88,14 +87,10 @@ unsafe extern "C" fn connection_status_update(status: c_int) {
     });
 }
 
-struct LogMessage;
-
-impl LogMessageCallback for LogMessage {
-    fn log_message(text: String) {
-        global_listener(|(_, listener)| {
-            listener.log_message(&text);
-        });
-    }
+fn log_message(text: &str) {
+    global_listener(|(_, listener)| {
+        listener.log_message(text);
+    });
 }
 
 unsafe extern "C" fn set_hdr_mode(enabled: bool) {
@@ -205,13 +200,15 @@ unsafe extern "C" fn controller_set_adaptive_triggers(
 }
 
 pub(crate) unsafe fn raw_callbacks() -> _CONNECTION_LISTENER_CALLBACKS {
+    set_log_message_handler(Some(log_message));
+
     _CONNECTION_LISTENER_CALLBACKS {
         stageStarting: Some(stage_starting),
         stageComplete: Some(stage_complete),
         stageFailed: Some(stage_failed),
         connectionStarted: Some(connection_started),
         connectionTerminated: Some(connection_terminated),
-        logMessage: Some(log_message_wrapper::<LogMessage>),
+        logMessage: Some(moonlight_sys_log_message),
         rumble: Some(controller_rumble),
         connectionStatusUpdate: Some(connection_status_update),
         setHdrMode: Some(set_hdr_mode),

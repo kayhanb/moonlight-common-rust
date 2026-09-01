@@ -45,3 +45,9 @@ This design allows the same protocol implementation to be reused across native a
 The [`examples/`](./examples) directory contains examples demonstrating how to use the crate with the I/O implementations this library provides.
 
 If you directly want to use the Sans IO protocol implementation, take a look at the [proto module](src/stream/proto/mod.rs) and the [std](src/stream/std/mod.rs) or [tokio](TODO) stream implementations as an example on how to use it.
+## LeCafe fork (`lecafe` branch)
+
+This branch is the pinned fork used by the LeCafe desktop client. Differences from upstream:
+
+- Builds on **stable Rust**: the `printf`-style `logMessage` callback of moonlight-common-c is formatted in a small C shim (`moonlight-common-sys/csrc/log_shim.c`, compiled by the `cc` crate) instead of the nightly-only `printf-compat` crate. `moonlight_common_sys::set_log_message_handler` receives the formatted lines.
+- `rust-toolchain.toml` removed (no nightly pin).
