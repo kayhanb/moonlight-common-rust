@@ -25,30 +25,41 @@ static GLOBAL_CONNECTION_LISTENER: Mutex<
     )>,
 > = Mutex::new(None);
 
+/// Runs `f` with the installed listener pair if there is one.
+///
+/// Returns `None` when no listener is set. These are `extern "C"` callbacks
+/// invoked by moonlight-common-c; a panic there cannot unwind and aborts the
+/// process. Callbacks can still arrive while a stream is being torn down —
+/// and a second stream in the same process re-installs the globals — so a
+/// missing listener is a normal state, not an invariant to assert. A poisoned
+/// mutex is recovered from for the same reason.
 fn global_listener<R>(
     f: impl FnOnce((&mut dyn ConnectionListener, &mut dyn ConnectionListenerC)) -> R,
-) -> R {
-    let lock = GLOBAL_CONNECTION_LISTENER.lock();
-    let mut lock = lock.expect("global connection listener");
-
-    let (listener, listener_c) = lock.as_mut().expect("global connection listener");
-    f((listener.as_mut(), listener_c.as_mut()))
+) -> Option<R> {
+    let mut lock = match GLOBAL_CONNECTION_LISTENER.lock() {
+        Ok(lock) => lock,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let (listener, listener_c) = lock.as_mut()?;
+    Some(f((listener.as_mut(), listener_c.as_mut())))
 }
 
 pub(crate) fn set_global(
     listener: impl ConnectionListener + Send + 'static,
     listener_c: impl ConnectionListenerC + Send + 'static,
 ) {
-    let mut global_listener = GLOBAL_CONNECTION_LISTENER
-        .lock()
-        .expect("global connection lock");
+    let mut global_listener = match GLOBAL_CONNECTION_LISTENER.lock() {
+        Ok(lock) => lock,
+        Err(poisoned) => poisoned.into_inner(),
+    };
 
     *global_listener = Some((Box::new(listener), Box::new(listener_c)));
 }
 pub(crate) fn clear_global() {
-    let mut decoder = GLOBAL_CONNECTION_LISTENER
-        .lock()
-        .expect("global video decoder");
+    let mut decoder = match GLOBAL_CONNECTION_LISTENER.lock() {
+        Ok(lock) => lock,
+        Err(poisoned) => poisoned.into_inner(),
+    };
 
     *decoder = None;
 }
@@ -132,7 +143,7 @@ unsafe extern "C" fn set_hdr_mode(enabled: bool) {
         };
 
         listener.set_hdr_mode(enabled, sunshine);
-    })
+    });
 }
 
 unsafe extern "C" fn controller_rumble(
@@ -170,12 +181,12 @@ unsafe extern "C" fn controller_set_motion_event_state(
                 report_rate_hz,
             );
         }
-    })
+    });
 }
 unsafe extern "C" fn controller_set_led(controller_number: u16, r: u8, g: u8, b: u8) {
     global_listener(|(listener, _)| {
         listener.controller_set_led(controller_number, r, g, b);
-    })
+    });
 }
 unsafe extern "C" fn controller_set_adaptive_triggers(
     controller_number: c_ushort,
@@ -196,7 +207,7 @@ unsafe extern "C" fn controller_set_adaptive_triggers(
             left,
             right,
         );
-    })
+    });
 }
 
 pub(crate) unsafe fn raw_callbacks() -> _CONNECTION_LISTENER_CALLBACKS {

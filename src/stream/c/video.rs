@@ -33,23 +33,40 @@ use crate::stream::{
 static GLOBAL_VIDEO_DECODER: Mutex<Option<Box<dyn VideoDecoder + Send + 'static>>> =
     Mutex::new(None);
 
-fn global_decoder<R>(f: impl FnOnce(&mut dyn VideoDecoder) -> R) -> R {
-    let lock = GLOBAL_VIDEO_DECODER.lock();
-    let mut lock = lock.expect("global video decoder");
-
-    let decoder = lock.as_mut().expect("global video decoder");
-    f(decoder.as_mut())
+/// Runs `f` with the global decoder if one is installed.
+///
+/// Returns `None` when no decoder is set. Callers are `extern "C"` callbacks
+/// invoked by moonlight-common-c, and a panic cannot unwind across that
+/// boundary — it aborts the whole process. moonlight-common-c can still
+/// deliver callbacks while a stream is being torn down (and a second stream
+/// in the same process re-installs the globals), so "no decoder right now"
+/// is a normal state that must be tolerated rather than asserted.
+///
+/// A poisoned mutex is also recovered from: the data it guards is an
+/// `Option<Box<dyn ...>>` that stays valid, and refusing to lock would turn
+/// one panic into an abort on every later callback.
+fn global_decoder<R>(f: impl FnOnce(&mut dyn VideoDecoder) -> R) -> Option<R> {
+    let mut lock = match GLOBAL_VIDEO_DECODER.lock() {
+        Ok(lock) => lock,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let decoder = lock.as_mut()?;
+    Some(f(decoder.as_mut()))
 }
 
 pub(crate) fn set_global(decoder: impl VideoDecoder + Send + 'static) {
-    let mut global_video_decoder = GLOBAL_VIDEO_DECODER
-        .lock()
-        .expect("global video decoder lock");
+    let mut global_video_decoder = match GLOBAL_VIDEO_DECODER.lock() {
+        Ok(lock) => lock,
+        Err(poisoned) => poisoned.into_inner(),
+    };
 
     *global_video_decoder = Some(Box::new(decoder));
 }
 pub(crate) fn clear_global() {
-    let mut decoder = GLOBAL_VIDEO_DECODER.lock().expect("global video decoder");
+    let mut decoder = match GLOBAL_VIDEO_DECODER.lock() {
+        Ok(lock) => lock,
+        Err(poisoned) => poisoned.into_inner(),
+    };
 
     *decoder = None;
 }
@@ -73,17 +90,22 @@ unsafe extern "C" fn setup(
 
         decoder.setup(setup)
     })
+    // No decoder installed (teardown/restart): report success so the C side
+    // continues its own shutdown instead of treating this as a failure.
+    .unwrap_or(0)
 }
 unsafe extern "C" fn start() {
     global_decoder(|decoder| {
         decoder.start();
-    })
+    });
 }
 
 unsafe extern "C" fn submit_decode_unit(decode_unit: PDECODE_UNIT) -> c_int {
     let unit = unsafe { convert_decode_unit(decode_unit) };
 
-    global_decoder(|decoder| decoder.submit_decode_unit(unit) as i32)
+    // No decoder (teardown in progress): report success so moonlight-common-c
+    // finishes shutting the stream down instead of retrying.
+    global_decoder(|decoder| decoder.submit_decode_unit(unit) as i32).unwrap_or(0)
 }
 /// Converts the cpp decode unit into the rust one
 unsafe fn convert_decode_unit<'a>(decode_unit: PDECODE_UNIT) -> VideoDecodeUnit<&'a [u8]> {
@@ -127,7 +149,7 @@ unsafe fn convert_decode_unit<'a>(decode_unit: PDECODE_UNIT) -> VideoDecodeUnit<
 unsafe extern "C" fn stop() {
     global_decoder(|decoder| {
         decoder.stop();
-    })
+    });
 }
 
 unsafe extern "C" fn cleanup() {
@@ -135,7 +157,7 @@ unsafe extern "C" fn cleanup() {
 }
 
 pub(crate) unsafe fn raw_callbacks() -> _DECODER_RENDERER_CALLBACKS {
-    let video_capabilities = global_decoder(|decoder| decoder.capabilities());
+    let video_capabilities = global_decoder(|decoder| decoder.capabilities()).unwrap_or_default();
 
     let mut capabilities = Capabilities::empty();
     if video_capabilities.pull_renderer {

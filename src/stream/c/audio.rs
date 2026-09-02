@@ -30,23 +30,31 @@ static TIMESTAMP_TRACKER: LazyLock<Mutex<TimestampTracker>> = LazyLock::new(|| {
     })
 });
 
-fn global_decoder<R>(f: impl FnOnce(&mut dyn AudioDecoder) -> R) -> R {
-    let lock = GLOBAL_AUDIO_DECODER.lock();
-    let mut lock = lock.expect("global audio decoder");
-
-    let decoder = lock.as_mut().expect("global audio decoder");
-    f(decoder.as_mut())
+/// Runs `f` with the global decoder if one is installed; see the note in
+/// `video.rs` — these are `extern "C"` callbacks, so a missing decoder or a
+/// poisoned mutex must never panic.
+fn global_decoder<R>(f: impl FnOnce(&mut dyn AudioDecoder) -> R) -> Option<R> {
+    let mut lock = match GLOBAL_AUDIO_DECODER.lock() {
+        Ok(lock) => lock,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let decoder = lock.as_mut()?;
+    Some(f(decoder.as_mut()))
 }
 
 pub(crate) fn set_global(decoder: impl AudioDecoder + Send + 'static) {
-    let mut global_audio_decoder = GLOBAL_AUDIO_DECODER
-        .lock()
-        .expect("global audio decoder lock");
+    let mut global_audio_decoder = match GLOBAL_AUDIO_DECODER.lock() {
+        Ok(lock) => lock,
+        Err(poisoned) => poisoned.into_inner(),
+    };
 
     *global_audio_decoder = Some(Box::new(decoder));
 }
 pub(crate) fn clear_global() {
-    let mut decoder = GLOBAL_AUDIO_DECODER.lock().expect("global video decoder");
+    let mut decoder = match GLOBAL_AUDIO_DECODER.lock() {
+        Ok(lock) => lock,
+        Err(poisoned) => poisoned.into_inner(),
+    };
 
     *decoder = None;
 }
@@ -82,6 +90,9 @@ unsafe extern "C" fn setup(
 
         decoder.setup(audio_config, opus_config)
     })
+    // No decoder installed (teardown/restart): report success so the C side
+    // continues its own shutdown instead of treating this as a failure.
+    .unwrap_or(0)
 }
 
 unsafe extern "C" fn start() {
@@ -95,7 +106,7 @@ unsafe extern "C" fn start() {
         }
 
         decoder.start();
-    })
+    });
 }
 
 unsafe extern "C" fn decode_and_play_sample(data: *mut c_char, len: c_int) {
@@ -119,13 +130,13 @@ unsafe extern "C" fn decode_and_play_sample(data: *mut c_char, len: c_int) {
             timestamp,
             buffer: data,
         });
-    })
+    });
 }
 
 unsafe extern "C" fn stop() {
     global_decoder(|decoder| {
         decoder.stop();
-    })
+    });
 }
 
 unsafe extern "C" fn cleanup() {
