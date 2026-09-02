@@ -205,6 +205,16 @@ impl MoonlightStream {
             audio::set_global(audio_decoder);
             let mut audio_callbacks = audio::raw_callbacks();
 
+            // LiStartConnection rejects a few inputs before it logs anything;
+            // record them so a -1 can be traced to the guard that produced it.
+            tracing::debug!(
+                target: "moonlight",
+                "LiStartConnection inputs: codec_mode_support={} app_version={:?} video_caps={:#x}",
+                server_info_raw.serverCodecModeSupport,
+                std::ffi::CStr::from_ptr(server_info_raw.serverInfoAppVersion),
+                video_callbacks.capabilities,
+            );
+
             // # Safety
             // LiStartConnection is not thread safe so we are using the connection_guard mutex
             let result = LiStartConnection(
