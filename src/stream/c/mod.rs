@@ -4,7 +4,6 @@ use std::{
     ptr::{null, null_mut},
     str::FromStr,
     sync::{Arc, LazyLock, Mutex},
-    thread::spawn,
     time::Duration,
 };
 
@@ -783,14 +782,25 @@ impl MoonlightStream {
 }
 
 impl Drop for MoonlightStream {
+    /// Stops the connection if the caller did not already do so.
+    ///
+    /// `stop()` consumes the handle, so dropping it afterwards must NOT stop
+    /// a second time: `LiStopConnection` and the global callbacks it clears
+    /// are process-wide, so a stray stop lands on whatever connection is
+    /// running by then. That is exactly what made a second stream in the same
+    /// process fail — the dropped handle tore down the new connection while it
+    /// was starting, and `LiStartConnection` returned -1 with no explanation.
+    ///
+    /// The teardown also runs on this thread rather than a detached one, so
+    /// it has finished before the caller can start another stream.
     fn drop(&mut self) {
+        if !self.is_connected() {
+            return;
+        }
         let this = MoonlightStream {
             server_version: self.server_version,
             handle: self.handle.clone(),
         };
-
-        spawn(move || {
-            this.stop();
-        });
+        this.stop();
     }
 }
