@@ -131,12 +131,12 @@ sdp-types = "0.1.8"
 serde = { version = "1.0.228", features = ["derive"], optional = true }
 
 [features]
-default = ["ureq", "std", "rustcrypto"]
+default = ["ureq", "std", "stream-proto", "rustcrypto"]
 
 serde = ["dep:serde"]
 
 # Different "runtimes"
-std = ["stream-proto", "dep:socket2"]
+std = ["dep:socket2"]
 tokio = ["dep:tokio", "stream-proto", "dep:socket2"]
 
 # Stream implementations

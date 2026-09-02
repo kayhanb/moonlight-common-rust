@@ -27,13 +27,16 @@ pub mod c;
 #[cfg(feature = "stream-proto")]
 pub mod proto;
 
-#[cfg(feature = "std")]
+// The std stream driver implements the pure-Rust protocol; it is meaningless
+// without it. `std` on its own only means "blocking runtime", so that a
+// consumer can use the std high-level API with the C protocol implementation.
+#[cfg(all(feature = "std", feature = "stream-proto"))]
 pub mod std;
 
 #[cfg(feature = "tokio")]
 pub mod tokio;
 
-#[cfg(any(feature = "std", feature = "tokio"))]
+#[cfg(any(all(feature = "std", feature = "stream-proto"), feature = "tokio"))]
 mod sockets;
 
 // Common implementation details
