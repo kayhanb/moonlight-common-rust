@@ -8,6 +8,7 @@ use std::{
 };
 
 use pem::Pem;
+use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, percent_decode_str, utf8_percent_encode};
 use roxmltree::Error;
 use thiserror::Error;
 use uuid::{Uuid, fmt::Hyphenated};
@@ -87,18 +88,44 @@ pub trait QueryBuilder {
     fn append(&mut self, param: QueryParam) -> Result<(), QueryBuilderError>;
 }
 
+/// Everything except RFC 3986 unreserved characters is percent-encoded in
+/// query keys and values (space becomes `%20`, matching moonlight-qt's
+/// `QUrlQuery`, which Sunshine/GFE decode).
+const QUERY_ENCODE_SET: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'_')
+    .remove(b'.')
+    .remove(b'~');
+
+/// Appends `key=value` (both percent-encoded) to a query string buffer.
+pub(crate) fn push_query_param(buffer: &mut String, param: &QueryParam) {
+    buffer.extend(utf8_percent_encode(param.key, QUERY_ENCODE_SET));
+    buffer.push('=');
+    buffer.extend(utf8_percent_encode(param.value, QUERY_ENCODE_SET));
+}
+
 impl QueryBuilder for String {
     fn append(&mut self, param: QueryParam) -> Result<(), QueryBuilderError> {
-        // TODO: filter for characters that need % serialization
         if !self.is_empty() {
             self.push('&');
         }
-        self.push_str(param.key);
-        self.push('=');
-        self.push_str(param.value);
+        push_query_param(self, &param);
 
         Ok(())
     }
+}
+
+/// Decodes a single query key or value (`%XX` escapes and `+` as space).
+fn decode_query_component(raw: &str) -> Cow<'_, str> {
+    if !raw.contains(['%', '+']) {
+        return Cow::Borrowed(raw);
+    }
+    let plus_as_space = raw.replace('+', " ");
+    Cow::Owned(
+        percent_decode_str(&plus_as_space)
+            .decode_utf8_lossy()
+            .into_owned(),
+    )
 }
 
 #[derive(Debug, Error)]
@@ -125,15 +152,13 @@ pub trait QueryMap {
 }
 
 impl QueryMap for &str {
-    // TODO: handle %20 and so on
-
     fn get<'b>(&'b self, param: &str) -> Result<Cow<'b, str>, FromQueryError> {
         for pair in self.split('&') {
             let mut parts = pair.splitn(2, '=');
             let key = parts.next().unwrap_or("");
-            if key == param {
+            if decode_query_component(key) == param {
                 let value = parts.next().unwrap_or("");
-                return Ok(Cow::Borrowed(value));
+                return Ok(decode_query_component(value));
             }
         }
         Err(FromQueryError::QueryParamNotFound(param.to_string()))
@@ -142,8 +167,45 @@ impl QueryMap for &str {
     fn has(&self, param: &str) -> bool {
         self.split('&').any(|pair| {
             let mut parts = pair.splitn(2, '=');
-            parts.next().unwrap_or("") == param
+            decode_query_component(parts.next().unwrap_or("")) == param
         })
+    }
+}
+
+#[cfg(test)]
+mod query_tests {
+    use super::{QueryBuilder, QueryMap, QueryParam};
+
+    #[test]
+    fn builder_percent_encodes_and_map_decodes() {
+        let mut query = String::new();
+        query
+            .append(QueryParam {
+                key: "devicename",
+                value: "LeCafe Desktop/1",
+            })
+            .unwrap();
+        query
+            .append(QueryParam {
+                key: "salt",
+                value: "0A-b_c.d~",
+            })
+            .unwrap();
+        assert_eq!(query, "devicename=LeCafe%20Desktop%2F1&salt=0A-b_c.d~");
+
+        let map: &str = &query;
+        assert_eq!(
+            QueryMap::get(&map, "devicename").unwrap(),
+            "LeCafe Desktop/1"
+        );
+        assert_eq!(QueryMap::get(&map, "salt").unwrap(), "0A-b_c.d~");
+        assert!(QueryMap::has(&map, "salt"));
+    }
+
+    #[test]
+    fn map_accepts_plus_as_space() {
+        let map: &str = "devicename=LeCafe+Desktop";
+        assert_eq!(QueryMap::get(&map, "devicename").unwrap(), "LeCafe Desktop");
     }
 }
 

@@ -25,7 +25,10 @@ pub trait RequestError: TryInto<ParseError, Error = Self> {
 mod hyperlike {
     use hyper::Uri;
 
-    use crate::http::{ClientInfo, Endpoint, QueryBuilder, QueryBuilderError, QueryParam, Request};
+    use crate::http::{
+        ClientInfo, Endpoint, QueryBuilder, QueryBuilderError, QueryParam, Request,
+        push_query_param,
+    };
 
     struct StringQueryBuilder<'a> {
         is_first: bool,
@@ -39,9 +42,7 @@ mod hyperlike {
             }
             self.is_first = false;
 
-            self.string.push_str(param.key);
-            self.string.push('=');
-            self.string.push_str(param.value);
+            push_query_param(self.string, &param);
 
             Ok(())
         }
