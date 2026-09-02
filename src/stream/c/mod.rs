@@ -220,6 +220,10 @@ impl MoonlightStream {
             );
 
             if result != 0 {
+                // moonlight-common-c only reports the failing stage through its
+                // log callback, and some early failures return before logging
+                // anything; recording the raw code makes them diagnosable.
+                tracing::error!(target: "moonlight", "LiStartConnection failed with {result}");
                 return Err(MoonlightError::ConnectionFailed);
             }
 
