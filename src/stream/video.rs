@@ -266,20 +266,27 @@ pub struct VideoDecodeUnit<Buf> {
     /// (happens when the frame is repeated).
     pub frame_processing_latency: Option<Duration>,
 
-    // TODO
-    /// Receive time of first buffer. This value uses an implementation-defined epoch,
-    /// but the same epoch as enqueueTimeMs and LiGetMillis().
-    // pub receive_time: Duration,
-    /// Time the frame was fully assembled and queued for the video decoder to process.
-    // TODO
-    /// This is also approximately the same time as the final packet was received, so
-    /// enqueueTimeMs - receiveTimeMs is the time taken to receive the frame. At the
-    /// time the decode unit is passed to submitDecodeUnit(), the total queue delay
-    /// can be calculated by LiGetMillis() - enqueueTimeMs.
-    // pub enqueue_time: Duration,
+    /// How long this frame took to arrive: the span between its first and its
+    /// last packet (`enqueueTimeUs - receiveTimeUs`).
+    ///
+    /// `None` when the transport does not report it (the pure-Rust protocol
+    /// implementation does not).
+    pub receive_duration: Option<Duration>,
 
-    /// The timestamp that the server sent.
-    /// 90kHz clock time representation.
+    /// How long the fully assembled frame waited before it reached the decoder:
+    /// the decode unit queue plus the thread hop that `CAPABILITY_DIRECT_SUBMIT`
+    /// removes. Measured when the decode unit is handed to the decoder, so it is
+    /// the delay the decoder actually paid.
+    ///
+    /// `None` when the transport does not report it.
+    pub queue_duration: Option<Duration>,
+
+    /// Presentation timestamp of the frame, with the epoch at the first frame
+    /// the host captured.
+    ///
+    /// The C implementation fills this from `presentationTimeUs`; the pure-Rust
+    /// one derives it from the 90 kHz RTP timestamp. Both are monotonic per
+    /// stream, so only differences are comparable across the two.
     ///
     /// References:
     /// - Moonlight common c: <https://github.com/moonlight-stream/moonlight-common-c/blob/62687809b1f7410c3db4be2527503a54ae408d70/src/RtpVideoQueue.c#L157>
@@ -301,6 +308,8 @@ impl<Buf> VideoDecodeUnit<Buf> {
             frame_number: self.frame_number,
             frame_type: self.frame_type,
             frame_processing_latency: self.frame_processing_latency,
+            receive_duration: self.receive_duration,
+            queue_duration: self.queue_duration,
             timestamp: self.timestamp,
             color_space: self.color_space,
             buffers: self.buffers.iter().map(|x| x.to_vec()).collect(),
@@ -315,6 +324,8 @@ impl<Buf> VideoDecodeUnit<Buf> {
             frame_number: self.frame_number,
             frame_type: self.frame_type,
             frame_processing_latency: self.frame_processing_latency,
+            receive_duration: self.receive_duration,
+            queue_duration: self.queue_duration,
             timestamp: self.timestamp,
             color_space: self.color_space,
             buffers: self.buffers.iter().map(|x| x.as_ref()).collect(),
@@ -329,6 +340,15 @@ pub struct VideoCapabilities {
     pub reference_frame_invalidation_av1: bool,
     /// This is only used in the moonlight-common-c implementation
     pub pull_renderer: bool,
+    /// Submit decode units straight from the thread that assembles them instead
+    /// of going through moonlight-common-c's decode unit queue and its own
+    /// decoder thread (`CAPABILITY_DIRECT_SUBMIT`).
+    ///
+    /// Removes a queue of up to 15 frames and a thread hop, at the cost of
+    /// running `submit_decode_unit` on the receive path: a slow decoder then
+    /// costs received packets. Only used in the moonlight-common-c
+    /// implementation, and mutually exclusive with [`Self::pull_renderer`].
+    pub direct_submit: bool,
     pub slices_per_frame: Option<u32>,
 }
 

@@ -62,6 +62,9 @@ impl<'a> VideoFrame<'a> {
             frame_number: self.metadata.frame_index,
             frame_type: self.parsed_frame_type,
             frame_processing_latency: self.metadata.host_processing_latency,
+            // Not tracked by this implementation.
+            receive_duration: None,
+            queue_duration: None,
             timestamp: self.metadata.timestamp,
             // TODO: how to get this?
             color_space: ColorSpace::Rec709,

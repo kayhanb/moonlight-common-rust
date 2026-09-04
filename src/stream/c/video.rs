@@ -133,14 +133,29 @@ unsafe fn convert_decode_unit<'a>(decode_unit: PDECODE_UNIT) -> VideoDecodeUnit<
     VideoDecodeUnit {
         frame_number: FrameIndex(raw.frameNumber as u32),
         frame_type: FrameType::from_i32(raw.frameType).expect("valid frame type"),
+        // The field is in 1/10 ms units; converting it to whole milliseconds
+        // rounded every sub-millisecond latency down to zero.
         frame_processing_latency: if raw.frameHostProcessingLatency == 0 {
             None
         } else {
-            Some(Duration::from_millis(
-                (raw.frameHostProcessingLatency / 10) as u64,
+            Some(Duration::from_micros(
+                raw.frameHostProcessingLatency as u64 * 100,
             ))
         },
-        timestamp: Duration::from_nanos((raw.presentationTimeUs * 1_000_000_000) / 90_000),
+        receive_duration: Some(Duration::from_micros(
+            raw.enqueueTimeUs.saturating_sub(raw.receiveTimeUs),
+        )),
+        // Read here, in the callback, because this is the moment the decoder
+        // gets the frame: with CAPABILITY_DIRECT_SUBMIT this is the depacketizer
+        // thread and the delay is ~0, without it the frame sat in the decode
+        // unit queue until the VideoDec thread woke up.
+        queue_duration: Some(Duration::from_micros(
+            moonlight_common_sys::now_micros().saturating_sub(raw.enqueueTimeUs),
+        )),
+        // presentationTimeUs is in MICROSECONDS (Limelight.h); the 90 kHz
+        // conversion belongs to rtpTimestamp and inflated every timestamp by
+        // ~11x when applied here.
+        timestamp: Duration::from_micros(raw.presentationTimeUs),
         color_space: ColorSpace::from_u8(raw.colorspace).expect("valid Colorspace"),
         buffers,
     }
@@ -162,6 +177,10 @@ pub(crate) unsafe fn raw_callbacks() -> _DECODER_RENDERER_CALLBACKS {
     let mut capabilities = Capabilities::empty();
     if video_capabilities.pull_renderer {
         capabilities |= Capabilities::PULL_RENDERER;
+    }
+    // Mutually exclusive with PULL_RENDERER (Connection.c refuses both).
+    if video_capabilities.direct_submit && !video_capabilities.pull_renderer {
+        capabilities |= Capabilities::DIRECT_SUBMIT;
     }
     if video_capabilities.reference_frame_invalidation_h264 {
         capabilities |= Capabilities::REFERENCE_FRAME_INVALIDATION_AVC;

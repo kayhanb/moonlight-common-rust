@@ -45,3 +45,23 @@ extern "C" fn moonlight_sys_rust_log(message: *const c_char) {
 
     handler(text.trim_end_matches(['\r', '\n']));
 }
+
+unsafe extern "C" {
+    /// Monotonic microsecond counter used by moonlight-common-c itself for the
+    /// `receiveTimeUs`/`enqueueTimeUs` fields of `DECODE_UNIT`.
+    ///
+    /// Declared in `moonlight-common-c/src/Platform.h`, which is not part of
+    /// the public header bindgen reads, so it is declared here by hand. Its
+    /// epoch is the first call to `PltTicksInit` and therefore unrelated to any
+    /// clock the caller has; only differences between two values are meaningful.
+    fn PltGetMicroseconds() -> u64;
+}
+
+/// Reads moonlight-common-c's own microsecond clock.
+///
+/// Only useful for subtracting from the timestamps carried by `DECODE_UNIT`
+/// (both use the same implementation-defined epoch).
+pub fn now_micros() -> u64 {
+    // SAFETY: the C function reads a monotonic clock and has no preconditions.
+    unsafe { PltGetMicroseconds() }
+}
