@@ -111,7 +111,15 @@ unsafe extern "C" fn start() {
 
 unsafe extern "C" fn decode_and_play_sample(data: *mut c_char, len: c_int) {
     global_decoder(|decoder| unsafe {
-        let data = slice::from_raw_parts(data as *mut u8, len as usize);
+        // moonlight-common-c reports a lost packet as `(NULL, 0)` so the decoder
+        // can conceal it (AudioStream.c `decodeInputData`). A slice built from a
+        // null pointer is undefined behavior — debug builds abort on it — so the
+        // decoder gets an empty sample instead.
+        let data: &[u8] = if data.is_null() || len <= 0 {
+            &[]
+        } else {
+            slice::from_raw_parts(data as *const u8, len as usize)
+        };
 
         let timestamp = {
             let mut lock = TIMESTAMP_TRACKER
@@ -153,5 +161,48 @@ pub(crate) unsafe fn raw_callbacks() -> _AUDIO_RENDERER_CALLBACKS {
         cleanup: Some(cleanup),
         decodeAndPlaySample: Some(decode_and_play_sample),
         capabilities: capabilities.bits() as i32,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+
+    struct Recorder(Arc<Mutex<Vec<usize>>>);
+
+    impl AudioDecoder for Recorder {
+        fn setup(&mut self, _: AudioConfig, _: OpusMultistreamConfig) -> i32 {
+            0
+        }
+
+        fn start(&mut self) {}
+
+        fn stop(&mut self) {}
+
+        fn decode_and_play_sample(&mut self, sample: AudioFrame<&[u8]>) {
+            self.0.lock().unwrap().push(sample.buffer.len());
+        }
+
+        fn config(&self) -> AudioConfig {
+            AudioConfig::STEREO
+        }
+    }
+
+    /// moonlight-common-c reports a lost packet as `(NULL, 0)` so the decoder can
+    /// conceal it; that has to reach the decoder as an empty sample instead of a
+    /// slice built from a null pointer.
+    #[test]
+    fn lost_packet_reaches_decoder_as_empty_sample() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        set_global(Recorder(seen.clone()));
+        let mut payload = [1u8, 2, 3];
+        unsafe {
+            decode_and_play_sample(std::ptr::null_mut(), 0);
+            decode_and_play_sample(payload.as_mut_ptr().cast(), payload.len() as c_int);
+        }
+        clear_global();
+        assert_eq!(*seen.lock().unwrap(), vec![0, 3]);
     }
 }

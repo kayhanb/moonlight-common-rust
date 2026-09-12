@@ -207,6 +207,9 @@ pub trait AudioDecoder {
     fn stop(&mut self);
 
     /// This callback provides Opus audio data to be decoded and played. sampleLength is in bytes.
+    ///
+    /// An empty `sample.buffer` marks a lost packet; the decoder may apply packet loss
+    /// concealment for it (libopus conceals when decoding an empty payload).
     fn decode_and_play_sample(&mut self, sample: AudioFrame<&[u8]>);
 
     fn config(&self) -> AudioConfig;
