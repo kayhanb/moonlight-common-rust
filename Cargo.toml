@@ -78,7 +78,7 @@ ureq = { version = "3.2.0", features = [
 ], default-features = false, optional = true }
 
 # Hyper Client
-rustls = { version = "0.23.37", default-features = false, optional = true }
+rustls = { version = "0.23.37", default-features = false, features = ["ring", "std", "tls12"], optional = true }
 hyper-util = { version = "0.1.20", features = [
     "client",
     "tracing",
@@ -161,7 +161,7 @@ rustcrypto = [
 ]
 
 # Request implementations
-ureq = ["dep:http", "dep:hyper", "dep:ureq"]
+ureq = ["dep:http", "dep:hyper", "dep:ureq", "dep:rustls"]
 tokio-hyper = [
     "dep:http",
     "dep:rustls",
