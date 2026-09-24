@@ -192,6 +192,11 @@ pub(crate) unsafe fn raw_callbacks() -> _DECODER_RENDERER_CALLBACKS {
         capabilities |= Capabilities::REFERENCE_FRAME_INVALIDATION_AV1;
     }
 
+    let mut raw_capabilities = capabilities.bits();
+    if let Some(slices) = video_capabilities.slices_per_frame {
+        raw_capabilities |= slices_per_frame_capability(slices);
+    }
+
     _DECODER_RENDERER_CALLBACKS {
         setup: Some(setup),
         start: Some(start),
@@ -202,8 +207,17 @@ pub(crate) unsafe fn raw_callbacks() -> _DECODER_RENDERER_CALLBACKS {
         } else {
             Some(submit_decode_unit)
         },
-        capabilities: capabilities.bits() as i32,
+        capabilities: raw_capabilities as i32,
     }
+}
+
+/// `CAPABILITY_SLICES_PER_FRAME(x)` from Limelight.h. It is a function-like
+/// macro, so bindgen does not generate it: the slice count lives in the top
+/// byte of the capabilities, and moonlight-common-c asks the host for that many
+/// slices per frame (`x-nv-video[0].videoEncoderSlicesPerFrame`). Zero means
+/// "not set" there and falls back to one slice.
+fn slices_per_frame_capability(slices: u32) -> u32 {
+    slices.min(u32::from(u8::MAX)) << 24
 }
 
 pub struct PullVideoDecoder {
@@ -427,5 +441,23 @@ impl<'a> Drop for PullVideoDecodeUnit<'a> {
         unsafe {
             LiCompleteVideoFrame(self.frame_handle, self.result as i32);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Same layout as `CAPABILITY_SLICES_PER_FRAME(x)`: `(unsigned char)x << 24`.
+    #[test]
+    fn slices_per_frame_goes_to_the_top_byte() {
+        assert_eq!(slices_per_frame_capability(4), 4 << 24);
+        assert_eq!(slices_per_frame_capability(4) >> 24, 4);
+        assert_eq!(slices_per_frame_capability(1000) >> 24, 255);
+        assert_eq!(
+            slices_per_frame_capability(4) & Capabilities::all().bits(),
+            0,
+            "must not overlap the capability flags"
+        );
     }
 }

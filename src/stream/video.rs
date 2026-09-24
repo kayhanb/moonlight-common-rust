@@ -349,6 +349,10 @@ pub struct VideoCapabilities {
     /// costs received packets. Only used in the moonlight-common-c
     /// implementation, and mutually exclusive with [`Self::pull_renderer`].
     pub direct_submit: bool,
+    /// Slices the host should split every frame into (`None` = one). A software
+    /// decoder decodes the slices of a frame in parallel, so a single-slice
+    /// stream keeps it on one core. Honored by both implementations; the C one
+    /// caps it at 255.
     pub slices_per_frame: Option<u32>,
 }
 
