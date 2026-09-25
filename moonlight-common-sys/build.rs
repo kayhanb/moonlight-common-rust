@@ -4,6 +4,7 @@ use std::path::PathBuf;
 fn main() {
     generate_bindings();
     compile_log_shim();
+    compile_cpu_shim();
 
     let allow_vendored = var("MOONLIGHT_COMMON_NO_VENDOR").is_err();
 
@@ -22,6 +23,23 @@ fn compile_log_shim() {
         .file("csrc/log_shim.c")
         .warnings(true)
         .compile("moonlight_sys_log_shim");
+}
+
+fn is_msvc_target() -> bool {
+    var("CARGO_CFG_TARGET_ENV").is_ok_and(|env| env == "msvc")
+}
+
+/// CPUID fallback for nanors under clang-cl; see csrc/cpu_shim.h.
+fn compile_cpu_shim() {
+    println!("cargo::rerun-if-changed=csrc/cpu_shim.h");
+    println!("cargo::rerun-if-changed=csrc/cpu_shim.c");
+    if !is_msvc_target() {
+        return;
+    }
+    cc::Build::new()
+        .file("csrc/cpu_shim.c")
+        .warnings(true)
+        .compile("moonlight_sys_cpu_shim");
 }
 
 fn generate_bindings() {
@@ -62,6 +80,13 @@ fn compile_moonlight(allow_vendored: bool) -> Option<(String, PathBuf)> {
     let mut config = cmake::Config::new("moonlight-common-c");
     config.define("BUILD_SHARED_LIBS", "OFF");
     config.define("CMAKE_TRY_COMPILE_TARGET_TYPE", "STATIC_LIBRARY");
+
+    // nanors' CPU feature checks need compiler-rt under clang-cl; route them
+    // to the CPUID shim instead (a no-op for cl.exe, see csrc/cpu_shim.h).
+    if is_msvc_target() {
+        let shim = PathBuf::from(var("CARGO_MANIFEST_DIR").unwrap()).join("csrc/cpu_shim.h");
+        config.cflag(format!("/FI{}", shim.display()));
+    }
 
     // Check if the target OS is Android
     if var("CARGO_CFG_TARGET_OS").unwrap_or_default() == "android"
