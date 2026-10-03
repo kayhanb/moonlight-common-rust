@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use crate::{
     App, AppId, ServerState, ServerVersion,
-    high::MoonlightClientError,
+    high::{MoonlightClientError, SessionStart},
     http::{
         ClientIdentifier, ClientInfo, ClientSecret, DEFAULT_UNIQUE_ID, ServerIdentifier,
         app_list::{AppListEndpoint, AppListRequest, AppListResponse},
@@ -530,10 +530,49 @@ where
         // Clearing cache so we refresh and can see if there's a game -> launch or resume?
         self.update()?;
 
+        self.start_stream_cached(
+            app_id,
+            settings,
+            aes_key,
+            aes_iv,
+            launch_query_parameters,
+            SessionStart::FromCache,
+        )
+    }
+
+    /// Starts a stream without refreshing the host state first.
+    ///
+    /// [Self::start_stream] refreshes the server info and the app list before
+    /// it opens the session, only to learn whether an app is already running
+    /// (launch or resume). Every request runs on a new connection, so on a
+    /// distant host that refresh costs more than the session request itself.
+    /// This variant trusts what is cached:
+    ///
+    /// - [SessionStart::FromCache] decides from the cached server info. Use it
+    ///   right after [Self::update] or [Self::set_identity] fetched it.
+    /// - [SessionStart::Resume] always resumes. Use it to reconnect to a host
+    ///   whose session this client left open: the resume request is the only
+    ///   one sent.
+    ///
+    /// A host that answers a resume with `resume = 0` is reported as
+    /// [MoonlightClientError::ResumeRefused]; refresh with
+    /// [Self::start_stream] and try again.
+    pub fn start_stream_cached(
+        &self,
+        app_id: AppId,
+        settings: &MoonlightStreamSettings,
+        aes_key: AesKey,
+        aes_iv: AesIv,
+        launch_query_parameters: &str,
+        start: SessionStart,
+    ) -> Result<MoonlightStreamConfig, MoonlightClientError> {
         let address = self.address.clone();
         let https_address = self.https_address()?;
 
-        let current_game = self.current_game()?;
+        let resume = match start {
+            SessionStart::Resume => true,
+            SessionStart::FromCache => self.current_game()? != 0,
+        };
 
         let request = ClientStreamRequest {
             app_id,
@@ -560,7 +599,7 @@ where
         let rtsp_session_url = {
             let client = self.client.lock().map_err(poison_err)?;
 
-            if current_game == 0 {
+            if !resume {
                 let launch_response = client
                     .send_https::<LaunchEndpoint>(client_info, &https_address, &request)
                     .map_err(req_err)?;
@@ -570,6 +609,14 @@ where
                 let resume_response = client
                     .send_https::<ResumeEndpoint>(client_info, &https_address, &request)
                     .map_err(req_err)?;
+
+                // The resume response is parsed without its status code, so a
+                // refusal ("no running app", "failed to initialize video
+                // capture") only shows up here. Without a session the
+                // connection would fail later with an unexplained error.
+                if resume_response.resume == 0 {
+                    return Err(MoonlightClientError::ResumeRefused);
+                }
 
                 resume_response.rtsp_session_url
             }
@@ -624,5 +671,314 @@ where
         }
 
         Ok(response.cancelled)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ::std::{cell::RefCell, str::FromStr};
+
+    use pem::Pem;
+    use thiserror::Error;
+
+    use super::*;
+    use crate::{
+        http::{Endpoint, ParseError, TextResponse, client::RequestError},
+        stream::{
+            EncryptionFlags, StreamingConfig,
+            audio::AudioConfig,
+            control::ActiveGamepads,
+            video::{ColorRange, ColorSpace, VideoFormats},
+        },
+    };
+
+    const DESKTOP: AppId = AppId(881448767);
+    const SESSION_URL: &str = "rtspenc://192.168.178.140:48010";
+
+    /// What the fake host is doing; a test changes it between calls.
+    #[derive(Clone, Copy)]
+    struct FakeHost {
+        /// `currentgame` in the server info: 0 when no app is running.
+        current_game: u32,
+        /// `resume` in the resume response: 0 when the host refuses.
+        resume: u32,
+    }
+
+    thread_local! {
+        static HOST: RefCell<FakeHost> = const {
+            RefCell::new(FakeHost {
+                current_game: 0,
+                resume: 1,
+            })
+        };
+        /// Every request the fake host received, in order.
+        static SEEN: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    }
+
+    #[derive(Debug, Error)]
+    enum FakeError {
+        #[error("parse: {0}")]
+        Parse(#[from] ParseError),
+    }
+
+    impl RequestError for FakeError {
+        fn is_connect(&self) -> bool {
+            false
+        }
+        fn is_encryption(&self) -> bool {
+            false
+        }
+    }
+
+    impl TryInto<ParseError> for FakeError {
+        type Error = Self;
+
+        fn try_into(self) -> Result<ParseError, Self::Error> {
+            match self {
+                Self::Parse(err) => Ok(err),
+            }
+        }
+    }
+
+    /// Answers like a Sunshine host and records the request.
+    fn answer<E>(scheme: &str) -> Result<E::Response, FakeError>
+    where
+        E: Endpoint,
+        E::Response: TextResponse<Err = ParseError>,
+    {
+        SEEN.with(|seen| seen.borrow_mut().push(format!("{scheme} {}", E::path())));
+        let host = HOST.with(|host| *host.borrow());
+
+        let body = match E::path() {
+            "/serverinfo" => format!(
+                "<root status_code=\"200\">\
+                 <hostname>PCNAME</hostname>\
+                 <appversion>7.1.431.-1</appversion>\
+                 <GfeVersion>3.23.0.74</GfeVersion>\
+                 <uniqueid>45924F0E-6465-B60F-B517-95DC63714036</uniqueid>\
+                 <HttpsPort>47984</HttpsPort>\
+                 <ExternalPort>47989</ExternalPort>\
+                 <MaxLumaPixelsHEVC>0</MaxLumaPixelsHEVC>\
+                 <mac>00:B0:D0:63:C2:26</mac>\
+                 <LocalIP>192.168.178.140</LocalIP>\
+                 <ServerCodecModeSupport>262145</ServerCodecModeSupport>\
+                 <PairStatus>1</PairStatus>\
+                 <currentgame>{}</currentgame>\
+                 <state>{}</state>\
+                 </root>",
+                host.current_game,
+                if host.current_game == 0 {
+                    "SUNSHINE_SERVER_FREE"
+                } else {
+                    "SUNSHINE_SERVER_BUSY"
+                },
+            ),
+            "/applist" => "<root status_code=\"200\">\
+                 <App>\
+                 <IsHdrSupported>0</IsHdrSupported>\
+                 <AppTitle>Desktop</AppTitle>\
+                 <ID>881448767</ID>\
+                 </App>\
+                 </root>"
+                .to_string(),
+            "/launch" => format!(
+                "<root status_code=\"200\">\
+                 <gamesession>1</gamesession>\
+                 <sessionUrl0>{SESSION_URL}</sessionUrl0>\
+                 </root>"
+            ),
+            "/resume" if host.resume == 0 => {
+                "<root status_code=\"503\" status_message=\"No running app to resume\">\
+                 <resume>0</resume>\
+                 </root>"
+                    .to_string()
+            }
+            "/resume" => format!(
+                "<root status_code=\"200\">\
+                 <resume>{}</resume>\
+                 <sessionUrl0>{SESSION_URL}</sessionUrl0>\
+                 </root>",
+                host.resume
+            ),
+            other => panic!("unexpected request: {other}"),
+        };
+
+        Ok(E::Response::from_str(&body)?)
+    }
+
+    #[derive(Clone)]
+    struct FakeClient;
+
+    impl RequestClient for FakeClient {
+        type Error = FakeError;
+
+        fn with_defaults() -> Result<Self, Self::Error> {
+            Ok(Self)
+        }
+        fn with_defaults_long_timeout() -> Result<Self, Self::Error> {
+            Ok(Self)
+        }
+
+        fn with_certificates(
+            _client_private_key: &Pem,
+            _client_certificate: &Pem,
+            _server_certificate: &Pem,
+        ) -> Result<Self, Self::Error> {
+            Ok(Self)
+        }
+
+        fn send_http<E>(
+            &self,
+            _client_info: ClientInfo,
+            _hostport: &str,
+            _request: &E::Request,
+        ) -> Result<E::Response, Self::Error>
+        where
+            E: Endpoint,
+            E::Response: TextResponse<Err = ParseError>,
+        {
+            answer::<E>("http")
+        }
+
+        fn send_https<E>(
+            &self,
+            _client_info: ClientInfo,
+            _hostport: &str,
+            _request: &E::Request,
+        ) -> Result<E::Response, Self::Error>
+        where
+            E: Endpoint,
+            E::Response: TextResponse<Err = ParseError>,
+        {
+            answer::<E>("https")
+        }
+
+        fn send_https_with_bytes<E>(
+            &self,
+            _client_info: ClientInfo,
+            _hostport: &str,
+            _request: &E::Request,
+        ) -> Result<E::Response, Self::Error>
+        where
+            E: Endpoint<Response = Vec<u8>>,
+        {
+            unreachable!("these tests request no box art")
+        }
+    }
+
+    /// A paired host whose state was just read, as right after `set_identity`.
+    fn paired_host(current_game: u32) -> MoonlightHost<FakeClient> {
+        HOST.with(|host| {
+            *host.borrow_mut() = FakeHost {
+                current_game,
+                resume: 1,
+            }
+        });
+
+        let host = MoonlightHost::<FakeClient>::new("192.168.178.140".to_string(), 47989, None)
+            .expect("host");
+        let pem = || Pem::new("CERTIFICATE", vec![1, 2, 3]);
+        host.set_identity(
+            ClientIdentifier::from_pem(pem()),
+            ClientSecret::from_pem(pem()),
+            ServerIdentifier::from_pem(pem()),
+        )
+        .expect("identity");
+
+        SEEN.with(|seen| seen.borrow_mut().clear());
+        host
+    }
+
+    /// The requests sent since the last call.
+    fn seen() -> Vec<String> {
+        SEEN.with(|seen| ::std::mem::take(&mut *seen.borrow_mut()))
+    }
+
+    fn settings() -> MoonlightStreamSettings {
+        MoonlightStreamSettings {
+            width: 1920,
+            height: 1080,
+            fps: 60,
+            fps_x100: 6000,
+            bitrate: 20_000,
+            packet_size: 1024,
+            encryption_flags: EncryptionFlags::all(),
+            streaming_remotely: StreamingConfig::Auto,
+            sops: true,
+            hdr: false,
+            supported_video_formats: VideoFormats::H264,
+            color_space: ColorSpace::Rec709,
+            color_range: ColorRange::Limited,
+            local_audio_play_mode: false,
+            audio_config: AudioConfig::STEREO,
+            gamepads_attached: ActiveGamepads::empty(),
+            gamepads_persist_after_disconnect: false,
+            enable_mic: false,
+        }
+    }
+
+    /// `None` refreshes first ([MoonlightHost::start_stream]).
+    fn start(
+        host: &MoonlightHost<FakeClient>,
+        cached: Option<SessionStart>,
+    ) -> Result<MoonlightStreamConfig, MoonlightClientError> {
+        let (key, iv) = (AesKey([7; 16]), AesIv(7));
+        match cached {
+            None => host.start_stream(DESKTOP, &settings(), key, iv, ""),
+            Some(start) => host.start_stream_cached(DESKTOP, &settings(), key, iv, "", start),
+        }
+    }
+
+    #[test]
+    fn start_stream_refreshes_the_host_state_first() {
+        let host = paired_host(0);
+        // An app was started on the host after its state was read.
+        HOST.with(|host| host.borrow_mut().current_game = DESKTOP.0);
+
+        start(&host, None).expect("stream config");
+
+        assert_eq!(
+            seen(),
+            [
+                "http /serverinfo",
+                "https /serverinfo",
+                "https /applist",
+                "https /resume"
+            ]
+        );
+    }
+
+    #[test]
+    fn cached_start_sends_only_the_session_request() {
+        let host = paired_host(0);
+        let config = start(&host, Some(SessionStart::FromCache)).expect("stream config");
+        assert_eq!(seen(), ["https /launch"]);
+        assert_eq!(config.rtsp_session_url.as_deref(), Some(SESSION_URL));
+
+        let host = paired_host(DESKTOP.0);
+        let config = start(&host, Some(SessionStart::FromCache)).expect("stream config");
+        assert_eq!(seen(), ["https /resume"]);
+        assert_eq!(config.rtsp_session_url.as_deref(), Some(SESSION_URL));
+    }
+
+    #[test]
+    fn forced_resume_ignores_the_cached_state() {
+        // The state was cached before this client launched its session.
+        let host = paired_host(0);
+
+        start(&host, Some(SessionStart::Resume)).expect("stream config");
+
+        assert_eq!(seen(), ["https /resume"]);
+    }
+
+    #[test]
+    fn refused_resume_is_an_error() {
+        let host = paired_host(DESKTOP.0);
+        HOST.with(|host| host.borrow_mut().resume = 0);
+
+        let err = start(&host, Some(SessionStart::Resume)).expect_err("refusal");
+
+        assert!(matches!(err, MoonlightClientError::ResumeRefused), "{err}");
+        assert_eq!(seen(), ["https /resume"]);
     }
 }
