@@ -88,6 +88,20 @@ fn compile_moonlight(allow_vendored: bool) -> Option<(String, PathBuf)> {
         config.cflag(format!("/FI{}", shim.display()));
     }
 
+    // moonlight-common-c's CMakeLists probes for clock_gettime but never hands
+    // the result to the compiler (moonlight-qt defines it in its own qmake
+    // file), so Platform.c silently falls back to gettimeofday. PltGetMillis
+    // then follows the wall clock: after a backwards step it wraps to a huge
+    // value and, once the wall clock passes the first-use time again, drops
+    // back to zero. The input thread's mouse batching then sleeps for the
+    // truncated difference (about 71 minutes), input stops and
+    // LiStopConnection hangs joining that thread. Every non-Windows,
+    // non-Apple target we build for has clock_gettime in libc.
+    let target_os = var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    if !matches!(target_os.as_str(), "windows" | "macos" | "ios") {
+        config.cflag("-DHAVE_CLOCK_GETTIME=1");
+    }
+
     // Check if the target OS is Android
     if var("CARGO_CFG_TARGET_OS").unwrap_or_default() == "android"
         && let Ok(ndk_root) = var("ANDROID_NDK_HOME")
